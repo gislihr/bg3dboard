@@ -278,7 +278,8 @@ const frameMat = new THREE.MeshStandardMaterial({
   map: woodTex, roughness: 0.35, metalness: 0.0, color: 0xc08050
 });
 const feltMat = new THREE.MeshStandardMaterial({
-  map: feltTex, roughness: 0.9, metalness: 0.0
+  map: feltTex, roughness: 0.9, metalness: 0.0,
+  polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
 });
 const tableMat = new THREE.MeshStandardMaterial({
   map: tableWoodTex, roughness: 0.5, metalness: 0.0, color: 0x8B6B4A
@@ -501,8 +502,8 @@ function buildTriangles() {
     const { x, z, dir } = getPointPosition(pt);
     const mat = (pt % 2 === 1) ? darkPointMat : lightPointMat;
 
-    // Triangle vertices on the XZ plane at SURFACE_Y + tiny offset
-    const y = SURFACE_Y + 0.005;
+    // Triangle vertices on the XZ plane, slightly above felt
+    const y = SURFACE_Y + 0.01;
 
     const vertices = new Float32Array([
       x - halfBase, y, z,                    // base left
@@ -514,16 +515,16 @@ function buildTriangles() {
       0, 1, 0,
       0, 1, 0,
     ]);
-    const indices = [0, 1, 2];
-
-    // Fix winding order based on direction
+    // Winding order: CCW when viewed from above (+Y) so front face points up
+    // dir=-1: tip at lower Z → [0,1,2] gives +Y normal
+    // dir=+1: tip at higher Z → [0,2,1] gives +Y normal
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     if (dir === -1) {
-      geo.setIndex([0, 2, 1]);
-    } else {
       geo.setIndex([0, 1, 2]);
+    } else {
+      geo.setIndex([0, 2, 1]);
     }
 
     const mesh = new THREE.Mesh(geo, mat);
