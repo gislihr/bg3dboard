@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Backgammon Board</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  canvas { display: block; }
+  #ui-top {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    padding: 12px 20px;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+  }
+  #ui-top label { color: #ccc; font-size: 14px; white-space: nowrap; }
+  #positionId {
+    width: 260px; padding: 8px 12px; border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.1);
+    color: #fff; font-size: 14px; font-family: 'Courier New', monospace;
+    outline: none; transition: border-color 0.2s;
+  }
+  #positionId:focus { border-color: rgba(255,255,255,0.5); }
+  #renderBtn {
+    padding: 8px 20px; border-radius: 6px; border: none;
+    background: #4a7c59; color: #fff; font-size: 14px; cursor: pointer;
+    transition: background 0.2s;
+  }
+  #renderBtn:hover { background: #5a9c6a; }
+  #hint {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.4); font-size: 12px;
+    background: rgba(0,0,0,0.4); padding: 6px 16px; border-radius: 20px;
+    backdrop-filter: blur(6px); pointer-events: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.172.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.172.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="ui-top">
+  <label for="positionId">Position ID:</label>
+  <input type="text" id="positionId" value="4HPwATDgc/ABMA" spellcheck="false" />
+  <button id="renderBtn">Render</button>
+</div>
+<div id="hint">Drag to orbit &bull; Scroll to zoom</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── Position ID Decoder ─────────────────────────────────────────────────────
+
+function decodePositionId(posId) {
+  // GNU Backgammon Position ID: base64 → bytes → bits → unary-encoded checker positions
+  const b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const padded = posId.replace(/-/g, '+').replace(/_/g, '/');
+  const bytes = [];
+  for (let i = 0; i < padded.length; i += 4) {
+    const a = b64.indexOf(padded[i]);
+    const b = b64.indexOf(padded[i + 1] || 'A');
+    const c = b64.indexOf(padded[i + 2] || 'A');
+    const d = b64.indexOf(padded[i + 3] || 'A');
+    bytes.push((a << 2) | (b >> 4));
+    bytes.push(((b & 15) << 4) | (c >> 2));
+    bytes.push(((c & 3) << 6) | d);
+  }
+
+  // Extract bits LSB-first from each byte
+  const bits = [];
+  for (let i = 0; i < Math.min(bytes.length, 10); i++) {
+    for (let bit = 0; bit < 8; bit++) {
+      bits.push((bytes[i] >> bit) & 1);
+    }
+  }
+
+  // Decode unary: for each of 25 positions (points 1-24 + bar), count 1s before 0
+  // First 25 separators = player 0 (white), next 25 = player 1 (black)
+  const white = new Array(26).fill(0); // 1-24 = points, 25 = bar, 0 = borne off
+  const black = new Array(26).fill(0);
+
+  let bitIdx = 0;
+  // Decode white checkers
+  for (let point = 0; point < 25; point++) {
+    let count = 0;
+    while (bitIdx < bits.length && bits[bitIdx] === 1) {
+      count++;
+      bitIdx++;
+    }
+    bitIdx++; // skip the 0 separator
+    if (point < 24) {
+      white[point + 1] = count; // points 1-24
+    } else {
+      white[25] = count; // bar
+    }
+  }
+  // Decode black checkers
+  for (let point = 0; point < 25; point++) {
+    let count = 0;
+    while (bitIdx < bits.length && bits[bitIdx] === 1) {
+      count++;
+      bitIdx++;
+    }
+    bitIdx++; // skip the 0 separator
+    if (point < 24) {
+      black[point + 1] = count; // points 1-24
+    } else {
+      black[25] = count; // bar
+    }
+  }
+
+  // Calculate borne off
+  let whiteTotal = 0, blackTotal = 0;
+  for (let i = 1; i <= 25; i++) { whiteTotal += white[i]; blackTotal += black[i]; }
+  white[0] = 15 - whiteTotal;
+  black[0] = 15 - blackTotal;
+
+  // Map GNUBG internal to display: GNUBG white point N = display point N,
+  // GNUBG black point N = display point (25 - N)
+  // Return: points[1..24] = {white: N, black: N}, bar = {white, black}, off = {white, black}
+  const points = [];
+  for (let i = 0; i <= 24; i++) points.push({ white: 0, black: 0 });
+
+  for (let i = 1; i <= 24; i++) {
+    points[i].white = white[i];
+  }
+  for (let i = 1; i <= 24; i++) {
+    points[25 - i].black = black[i];
+  }
+
+  return {
+    points,
+    bar: { white: white[25], black: black[25] },
+    off: { white: white[0], black: black[0] }
+  };
+}
+
+// ─── Procedural Textures ─────────────────────────────────────────────────────
+
+function seededRandom(seed) {
+  let s = seed;
+  return () => { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; };
+}
+
+function createWoodTexture(width = 512, height = 512, baseColor = [140, 90, 50]) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const rand = seededRandom(42);
+
+  // Base color
+  ctx.fillStyle = `rgb(${baseColor[0]},${baseColor[1]},${baseColor[2]})`;
+  ctx.fillRect(0, 0, width, height);
+
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      // Grain lines running along X
+      const grainFreq = 0.02 + rand() * 0.005;
+      const grain = Math.sin(y * grainFreq + Math.sin(x * 0.01) * 3) * 0.5 + 0.5;
+      const fineGrain = Math.sin(y * 0.15 + Math.sin(x * 0.03 + y * 0.01) * 2) * 0.3 + 0.7;
+      const noise = (rand() - 0.5) * 15;
+
+      const factor = grain * 0.4 + fineGrain * 0.3 + 0.3;
+      data[idx]     = Math.min(255, Math.max(0, baseColor[0] * factor + noise));
+      data[idx + 1] = Math.min(255, Math.max(0, baseColor[1] * factor + noise * 0.7));
+      data[idx + 2] = Math.min(255, Math.max(0, baseColor[2] * factor + noise * 0.5));
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+function createFeltTexture(width = 512, height = 512) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const rand = seededRandom(123);
+
+  const imgData = ctx.createImageData(width, height);
+  const data = imgData.data;
+  const base = [25, 80, 40];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const noise = (rand() - 0.5) * 20;
+      const fiber = Math.sin(x * 0.5 + rand() * 6) * 3 + Math.sin(y * 0.5 + rand() * 6) * 3;
+      data[idx]     = Math.max(0, Math.min(255, base[0] + noise + fiber));
+      data[idx + 1] = Math.max(0, Math.min(255, base[1] + noise + fiber));
+      data[idx + 2] = Math.max(0, Math.min(255, base[2] + noise + fiber));
+      data[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+// ─── Scene Setup ─────────────────────────────────────────────────────────────
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a1a);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(0, 25, 20);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 10;
+controls.maxDistance = 60;
+controls.maxPolarAngle = Math.PI / 2 - 0.05;
+controls.target.set(0, 0, 0);
+
+// ─── Lighting ────────────────────────────────────────────────────────────────
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+scene.add(ambientLight);
+
+const hemiLight = new THREE.HemisphereLight(0xffeedd, 0x444422, 0.4);
+scene.add(hemiLight);
+
+const mainLight = new THREE.DirectionalLight(0xfff5e0, 1.8);
+mainLight.position.set(10, 20, 8);
+mainLight.castShadow = true;
+mainLight.shadow.mapSize.set(2048, 2048);
+mainLight.shadow.camera.left = -20;
+mainLight.shadow.camera.right = 20;
+mainLight.shadow.camera.top = 20;
+mainLight.shadow.camera.bottom = -20;
+mainLight.shadow.camera.near = 1;
+mainLight.shadow.camera.far = 50;
+mainLight.shadow.bias = -0.001;
+scene.add(mainLight);
+
+const fillLight = new THREE.DirectionalLight(0xd0e0ff, 0.5);
+fillLight.position.set(-8, 12, -6);
+scene.add(fillLight);
+
+// ─── Materials ───────────────────────────────────────────────────────────────
+
+const woodTex = createWoodTexture(512, 512, [140, 90, 50]);
+const darkWoodTex = createWoodTexture(512, 512, [80, 45, 25]);
+const feltTex = createFeltTexture(512, 512);
+const tableWoodTex = createWoodTexture(1024, 1024, [100, 65, 35]);
+tableWoodTex.repeat.set(4, 4);
+
+const frameMat = new THREE.MeshStandardMaterial({
+  map: woodTex, roughness: 0.35, metalness: 0.0, color: 0xc08050
+});
+const feltMat = new THREE.MeshStandardMaterial({
+  map: feltTex, roughness: 0.9, metalness: 0.0
+});
+const tableMat = new THREE.MeshStandardMaterial({
+  map: tableWoodTex, roughness: 0.5, metalness: 0.0, color: 0x8B6B4A
+});
+
+const darkPointMat = new THREE.MeshStandardMaterial({ color: 0x5c1a1a, roughness: 0.6 });
+const lightPointMat = new THREE.MeshStandardMaterial({ color: 0xd4b374, roughness: 0.5 });
+const barMat = new THREE.MeshStandardMaterial({
+  map: woodTex, roughness: 0.35, color: 0xb08050
+});
+const hingeMat = new THREE.MeshStandardMaterial({
+  color: 0xc8a830, roughness: 0.3, metalness: 0.8
+});
+
+const whiteCheckerMat = new THREE.MeshPhysicalMaterial({
+  color: 0xf5f0e0, roughness: 0.15, metalness: 0.0,
+  clearcoat: 0.8, clearcoatRoughness: 0.1
+});
+const blackCheckerMat = new THREE.MeshPhysicalMaterial({
+  color: 0x1a1a1a, roughness: 0.15, metalness: 0.0,
+  clearcoat: 0.8, clearcoatRoughness: 0.1
+});
+
+// ─── Board Dimensions ────────────────────────────────────────────────────────
+
+const BOARD = {
+  length: 18,       // Z total (across points)
+  halfWidth: 7.5,   // X half (each side from center)
+  frameW: 0.8,      // frame border width
+  frameH: 1.0,      // frame height
+  recessD: 0.15,    // playing surface recess depth
+  barW: 0.9,        // bar width
+  trayW: 1.8,       // bearing-off tray width
+  pointLen: 7.2,    // triangle length
+  pointBase: 1.8,   // triangle base width at edge
+  checkerR: 0.85,   // checker radius
+  checkerH: 0.22,   // checker height
+};
+
+// Computed positions
+const INNER_LEFT = -(BOARD.halfWidth);
+const INNER_RIGHT = BOARD.halfWidth;
+const SURFACE_Y = BOARD.frameH - BOARD.recessD;
+
+// ─── Build Board ─────────────────────────────────────────────────────────────
+
+const boardGroup = new THREE.Group();
+scene.add(boardGroup);
+
+// Table
+const tableGeo = new THREE.BoxGeometry(60, 0.5, 40);
+const table = new THREE.Mesh(tableGeo, tableMat);
+table.position.y = -0.25;
+table.receiveShadow = true;
+scene.add(table);
+
+// Frame - built with ExtrudeGeometry from a shape with holes
+function buildFrame() {
+  const hw = BOARD.halfWidth + BOARD.trayW; // total half width including tray
+  const hl = BOARD.length / 2;
+  const fw = BOARD.frameW;
+  const barHalf = BOARD.barW / 2;
+
+  // Outer shape
+  const shape = new THREE.Shape();
+  shape.moveTo(-hw - fw, -hl - fw);
+  shape.lineTo(hw + fw, -hl - fw);
+  shape.lineTo(hw + fw, hl + fw);
+  shape.lineTo(-hw - fw, hl + fw);
+  shape.closePath();
+
+  // Left playing surface hole (no tray on left - hinges there)
+  const holeLeft = new THREE.Path();
+  holeLeft.moveTo(-BOARD.halfWidth, -hl);
+  holeLeft.lineTo(-barHalf, -hl);
+  holeLeft.lineTo(-barHalf, hl);
+  holeLeft.lineTo(-BOARD.halfWidth, hl);
+  holeLeft.closePath();
+  shape.holes.push(holeLeft);
+
+  // Right playing surface hole (includes tray area)
+  const holeRight = new THREE.Path();
+  holeRight.moveTo(barHalf, -hl);
+  holeRight.lineTo(hw, -hl);
+  holeRight.lineTo(hw, hl);
+  holeRight.lineTo(barHalf, hl);
+  holeRight.closePath();
+  shape.holes.push(holeRight);
+
+  // Tray holes (left side - bearing off for visual separation)
+  // We'll skip tray holes - trays are just part of the frame rim
+
+  const extrudeSettings = { depth: BOARD.frameH, bevelEnabled: false };
+  const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+  geo.rotateX(-Math.PI / 2);
+  const mesh = new THREE.Mesh(geo, frameMat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  boardGroup.add(mesh);
+}
+buildFrame();
+
+// Playing surfaces (recessed)
+function buildSurfaces() {
+  const hw = BOARD.halfWidth;
+  const hl = BOARD.length / 2;
+  const barHalf = BOARD.barW / 2;
+
+  // Left surface
+  const leftGeo = new THREE.PlaneGeometry(hw - barHalf, BOARD.length);
+  const leftSurf = new THREE.Mesh(leftGeo, feltMat);
+  leftSurf.rotation.x = -Math.PI / 2;
+  leftSurf.position.set(-(hw + barHalf) / 2, SURFACE_Y, 0);
+  leftSurf.receiveShadow = true;
+  boardGroup.add(leftSurf);
+
+  // Right surface
+  const rightGeo = new THREE.PlaneGeometry(hw - barHalf, BOARD.length);
+  const rightSurf = new THREE.Mesh(rightGeo, feltMat);
+  rightSurf.rotation.x = -Math.PI / 2;
+  rightSurf.position.set((hw + barHalf) / 2, SURFACE_Y, 0);
+  rightSurf.receiveShadow = true;
+  boardGroup.add(rightSurf);
+}
+buildSurfaces();
+
+// Bar
+function buildBar() {
+  const barGeo = new THREE.BoxGeometry(BOARD.barW, BOARD.frameH, BOARD.length);
+  const bar = new THREE.Mesh(barGeo, barMat);
+  bar.position.set(0, BOARD.frameH / 2, 0);
+  bar.castShadow = true;
+  bar.receiveShadow = true;
+  boardGroup.add(bar);
+}
+buildBar();
+
+// Tray dividers - thin inner walls to separate tray from playing surface
+function buildTrays() {
+  const hw = BOARD.halfWidth;
+  const hl = BOARD.length / 2;
+
+  // Right tray inner wall
+  const wallGeo = new THREE.BoxGeometry(0.15, BOARD.frameH, BOARD.length);
+  const wallR = new THREE.Mesh(wallGeo, frameMat);
+  wallR.position.set(hw + 0.075, BOARD.frameH / 2, 0);
+  wallR.castShadow = true;
+  boardGroup.add(wallR);
+
+  // Tray floor (right side)
+  const trayFloorGeo = new THREE.PlaneGeometry(BOARD.trayW - 0.15, BOARD.length);
+  const trayFloor = new THREE.Mesh(trayFloorGeo, feltMat);
+  trayFloor.rotation.x = -Math.PI / 2;
+  trayFloor.position.set(hw + BOARD.trayW / 2 + 0.075, SURFACE_Y, 0);
+  trayFloor.receiveShadow = true;
+  boardGroup.add(trayFloor);
+}
+buildTrays();
+
+// Hinges
+function buildHinges() {
+  const hw = BOARD.halfWidth + BOARD.trayW + BOARD.frameW;
+  const hingeGeo = new THREE.CylinderGeometry(0.25, 0.25, 1.2, 16);
+  [-3, 3].forEach(z => {
+    const hinge = new THREE.Mesh(hingeGeo, hingeMat);
+    hinge.position.set(-hw, BOARD.frameH / 2, z);
+    hinge.castShadow = true;
+    boardGroup.add(hinge);
+  });
+}
+buildHinges();
+
+// ─── Point Triangles ─────────────────────────────────────────────────────────
+
+function getPointPosition(pointNum) {
+  // Returns {x, z, direction} for each point 1-24
+  // Points 1-6: bottom-right quadrant (player's home board)
+  // Points 7-12: bottom-left quadrant
+  // Points 13-18: top-left quadrant
+  // Points 19-24: top-right quadrant
+  // Direction: 1 = pointing up (bottom row), -1 = pointing down (top row)
+  const hw = BOARD.halfWidth;
+  const hl = BOARD.length / 2;
+  const barHalf = BOARD.barW / 2;
+  const spacing = (hw - barHalf) / 6;
+
+  let x, z, dir;
+  if (pointNum >= 1 && pointNum <= 6) {
+    // Bottom right, right to left
+    x = hw - spacing * (pointNum - 0.5);
+    z = hl;
+    dir = -1; // triangles point toward center (negative Z)
+  } else if (pointNum >= 7 && pointNum <= 12) {
+    // Bottom left, right to left
+    x = -barHalf - spacing * (pointNum - 6 - 0.5);
+    z = hl;
+    dir = -1;
+  } else if (pointNum >= 13 && pointNum <= 18) {
+    // Top left, left to right
+    x = -barHalf - spacing * (18 - pointNum + 0.5);
+    z = -hl;
+    dir = 1;
+  } else {
+    // Top right, left to right
+    x = barHalf + spacing * (pointNum - 18 - 0.5);
+    z = -hl;
+    dir = 1;
+  }
+  return { x, z, dir, spacing };
+}
+
+function buildTriangles() {
+  const pLen = BOARD.pointLen;
+  const hw = BOARD.halfWidth;
+  const barHalf = BOARD.barW / 2;
+  const spacing = (hw - barHalf) / 6;
+  const halfBase = spacing * 0.45;
+
+  for (let pt = 1; pt <= 24; pt++) {
+    const { x, z, dir } = getPointPosition(pt);
+    const mat = (pt % 2 === 1) ? darkPointMat : lightPointMat;
+
+    // Triangle vertices on the XZ plane at SURFACE_Y + tiny offset
+    const y = SURFACE_Y + 0.005;
+
+    const vertices = new Float32Array([
+      x - halfBase, y, z,                    // base left
+      x + halfBase, y, z,                    // base right
+      x,            y, z + dir * pLen,       // tip
+    ]);
+    const normals = new Float32Array([
+      0, 1, 0,
+      0, 1, 0,
+      0, 1, 0,
+    ]);
+    const indices = [0, 1, 2];
+
+    // Fix winding order based on direction
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    if (dir === -1) {
+      geo.setIndex([0, 2, 1]);
+    } else {
+      geo.setIndex([0, 1, 2]);
+    }
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.receiveShadow = true;
+    boardGroup.add(mesh);
+  }
+}
+buildTriangles();
+
+// ─── Checker Geometry ────────────────────────────────────────────────────────
+
+function createCheckerGeometry() {
+  // Lathe profile: flat disc with beveled edges
+  const r = BOARD.checkerR;
+  const h = BOARD.checkerH;
+  const bevel = 0.06;
+
+  const points = [
+    new THREE.Vector2(0, 0),
+    new THREE.Vector2(r - bevel, 0),
+    new THREE.Vector2(r, bevel),
+    new THREE.Vector2(r, h - bevel),
+    new THREE.Vector2(r - bevel, h),
+    new THREE.Vector2(0, h),
+  ];
+  return new THREE.LatheGeometry(points, 32);
+}
+const checkerGeo = createCheckerGeometry();
+
+// ─── Place Checkers ──────────────────────────────────────────────────────────
+
+let checkerMeshes = [];
+
+function clearCheckers() {
+  checkerMeshes.forEach(m => {
+    boardGroup.remove(m);
+    m.geometry === checkerGeo || m.geometry.dispose();
+  });
+  checkerMeshes = [];
+}
+
+function placeCheckers(position) {
+  clearCheckers();
+
+  const hw = BOARD.halfWidth;
+  const barHalf = BOARD.barW / 2;
+  const spacing = (hw - barHalf) / 6;
+
+  // Place checkers on points 1-24
+  for (let pt = 1; pt <= 24; pt++) {
+    const whiteCount = position.points[pt].white;
+    const blackCount = position.points[pt].black;
+
+    if (whiteCount > 0) placeCheckersOnPoint(pt, whiteCount, 'white', spacing);
+    if (blackCount > 0) placeCheckersOnPoint(pt, blackCount, 'black', spacing);
+  }
+
+  // Bar checkers
+  if (position.bar.white > 0) placeCheckersOnBar(position.bar.white, 'white');
+  if (position.bar.black > 0) placeCheckersOnBar(position.bar.black, 'black');
+
+  // Borne-off checkers in tray
+  if (position.off.white > 0) placeCheckersInTray(position.off.white, 'white');
+  if (position.off.black > 0) placeCheckersInTray(position.off.black, 'black');
+}
+
+function placeCheckersOnPoint(pt, count, color, spacing) {
+  const { x, z, dir } = getPointPosition(pt);
+  const mat = color === 'white' ? whiteCheckerMat : blackCheckerMat;
+  const maxUncompressed = 5;
+  const checkerSpacing = count <= maxUncompressed
+    ? BOARD.checkerR * 2
+    : (BOARD.pointLen - BOARD.checkerR) / count;
+
+  for (let i = 0; i < count; i++) {
+    const mesh = new THREE.Mesh(checkerGeo, mat);
+    const stackZ = z + dir * (BOARD.checkerR + i * checkerSpacing);
+    mesh.position.set(x, SURFACE_Y, stackZ);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    boardGroup.add(mesh);
+    checkerMeshes.push(mesh);
+  }
+}
+
+function placeCheckersOnBar(count, color) {
+  const mat = color === 'white' ? whiteCheckerMat : blackCheckerMat;
+  // White bar checkers on bottom half, black on top half
+  const startZ = color === 'white' ? 2 : -2;
+  const dir = color === 'white' ? -1 : 1;
+
+  for (let i = 0; i < count; i++) {
+    const mesh = new THREE.Mesh(checkerGeo, mat);
+    mesh.position.set(0, BOARD.frameH + i * BOARD.checkerH, startZ + dir * i * 0.01);
+    mesh.castShadow = true;
+    boardGroup.add(mesh);
+    checkerMeshes.push(mesh);
+  }
+}
+
+function placeCheckersInTray(count, color) {
+  const mat = color === 'white' ? whiteCheckerMat : blackCheckerMat;
+  const trayX = BOARD.halfWidth + BOARD.trayW / 2 + 0.075;
+  // White in bottom half, black in top half
+  const startZ = color === 'white' ? BOARD.length / 2 - 1 : -BOARD.length / 2 + 1;
+  const dir = color === 'white' ? -1 : 1;
+
+  // Lay checkers on their side in tray
+  for (let i = 0; i < count; i++) {
+    const mesh = new THREE.Mesh(checkerGeo, mat);
+    mesh.rotation.x = Math.PI / 2;
+    const zPos = startZ + dir * i * (BOARD.checkerH + 0.02);
+    mesh.position.set(trayX, SURFACE_Y + BOARD.checkerR, zPos);
+    mesh.castShadow = true;
+    boardGroup.add(mesh);
+    checkerMeshes.push(mesh);
+  }
+}
+
+// ─── Point Number Labels ─────────────────────────────────────────────────────
+
+function createPointLabels() {
+  const hw = BOARD.halfWidth;
+  const hl = BOARD.length / 2;
+  const barHalf = BOARD.barW / 2;
+  const spacing = (hw - barHalf) / 6;
+  const fw = BOARD.frameW;
+
+  for (let pt = 1; pt <= 24; pt++) {
+    const { x } = getPointPosition(pt);
+    const isBottom = pt <= 12;
+    const z = isBottom ? hl + fw * 0.5 : -(hl + fw * 0.5);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#c0a060';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(pt), 32, 16);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.position.set(x, BOARD.frameH + 0.5, z);
+    sprite.scale.set(1.2, 0.6, 1);
+    boardGroup.add(sprite);
+  }
+}
+createPointLabels();
+
+// ─── Initial Render ──────────────────────────────────────────────────────────
+
+function renderPosition(posId) {
+  try {
+    const position = decodePositionId(posId);
+    placeCheckers(position);
+  } catch (e) {
+    console.error('Failed to decode position ID:', e);
+  }
+}
+
+// Start with default position
+renderPosition(document.getElementById('positionId').value);
+
+// ─── UI Events ───────────────────────────────────────────────────────────────
+
+document.getElementById('renderBtn').addEventListener('click', () => {
+  renderPosition(document.getElementById('positionId').value.trim());
+});
+
+document.getElementById('positionId').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    renderPosition(e.target.value.trim());
+  }
+});
+
+// ─── Animation Loop ──────────────────────────────────────────────────────────
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// ─── Resize ──────────────────────────────────────────────────────────────────
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+</script>
+</body>
+</html>
