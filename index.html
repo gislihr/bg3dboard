@@ -464,27 +464,30 @@ function getPointPosition(pointNum) {
   const hw = BOARD.halfWidth;
   const hl = BOARD.length / 2;
   const barHalf = BOARD.barW / 2;
-  const spacing = (hw - barHalf) / 6;
+  // Ensure outermost point center is checkerR from the edge so checkers
+  // don't clip the frame wall. 6 points → 5 gaps between edge margins.
+  const margin = BOARD.checkerR;
+  const spacing = (hw - barHalf - 2 * margin) / 5;
 
   let x, z, dir;
   if (pointNum >= 1 && pointNum <= 6) {
-    // Bottom right, right to left
-    x = hw - spacing * (pointNum - 0.5);
+    // Bottom right, right to left: pt1 near hw edge, pt6 near bar
+    x = (hw - margin) - (pointNum - 1) * spacing;
     z = hl;
-    dir = -1; // triangles point toward center (negative Z)
+    dir = -1;
   } else if (pointNum >= 7 && pointNum <= 12) {
-    // Bottom left, right to left
-    x = -barHalf - spacing * (pointNum - 6 - 0.5);
+    // Bottom left, right to left: pt7 near bar, pt12 near left edge
+    x = -(barHalf + margin) - (pointNum - 7) * spacing;
     z = hl;
     dir = -1;
   } else if (pointNum >= 13 && pointNum <= 18) {
-    // Top left, left to right
-    x = -barHalf - spacing * (18 - pointNum + 0.5);
+    // Top left, left to right: pt13 near left edge, pt18 near bar
+    x = -(hw - margin) + (pointNum - 13) * spacing;
     z = -hl;
     dir = 1;
   } else {
-    // Top right, left to right
-    x = barHalf + spacing * (pointNum - 18 - 0.5);
+    // Top right, left to right: pt19 near bar, pt24 near hw edge
+    x = (barHalf + margin) + (pointNum - 19) * spacing;
     z = -hl;
     dir = 1;
   }
@@ -493,9 +496,8 @@ function getPointPosition(pointNum) {
 
 function buildTriangles() {
   const pLen = BOARD.pointLen;
-  const hw = BOARD.halfWidth;
-  const barHalf = BOARD.barW / 2;
-  const spacing = (hw - barHalf) / 6;
+  // Get spacing from the same calculation used by getPointPosition
+  const { spacing } = getPointPosition(1);
   const halfBase = spacing * 0.45;
 
   for (let pt = 1; pt <= 24; pt++) {
@@ -594,6 +596,8 @@ function placeCheckers(position) {
 function placeCheckersOnPoint(pt, count, color, spacing) {
   const { x, z, dir } = getPointPosition(pt);
   const mat = color === 'white' ? whiteCheckerMat : blackCheckerMat;
+  // Small inset so first checker doesn't clip the frame wall
+  const startOffset = BOARD.checkerR + 0.1;
   const maxUncompressed = 5;
   const checkerSpacing = count <= maxUncompressed
     ? BOARD.checkerR * 2
@@ -601,7 +605,7 @@ function placeCheckersOnPoint(pt, count, color, spacing) {
 
   for (let i = 0; i < count; i++) {
     const mesh = new THREE.Mesh(checkerGeo, mat);
-    const stackZ = z + dir * (BOARD.checkerR + i * checkerSpacing);
+    const stackZ = z + dir * (startOffset + i * checkerSpacing);
     mesh.position.set(x, SURFACE_Y, stackZ);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
