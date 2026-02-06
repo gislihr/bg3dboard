@@ -603,10 +603,15 @@ function placeCheckersOnPoint(pt, count, color, spacing) {
     ? BOARD.checkerR * 2
     : (BOARD.pointLen - BOARD.checkerR) / count;
 
+  // Per-point X offset so the whole stack shifts together (no inter-checker overlap)
+  const pointJx = (Math.random() - 0.5) * 0.15;
   for (let i = 0; i < count; i++) {
     const mesh = new THREE.Mesh(checkerGeo, mat);
+    // Per-checker Z jitter and slight Y rotation for hand-placed look
+    const jz = (Math.random() - 0.5) * 0.12;
+    mesh.rotation.y = (Math.random() - 0.5) * 0.3;
     const stackZ = z + dir * (startOffset + i * checkerSpacing);
-    mesh.position.set(x, SURFACE_Y, stackZ);
+    mesh.position.set(x + pointJx, SURFACE_Y, stackZ + jz);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     boardGroup.add(mesh);
