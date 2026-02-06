@@ -653,38 +653,6 @@ function placeCheckersInTray(count, color) {
   }
 }
 
-// ─── Point Number Labels ─────────────────────────────────────────────────────
-
-function createPointLabels() {
-  const hw = BOARD.halfWidth;
-  const hl = BOARD.length / 2;
-  const barHalf = BOARD.barW / 2;
-  const spacing = (hw - barHalf) / 6;
-  const fw = BOARD.frameW;
-
-  for (let pt = 1; pt <= 24; pt++) {
-    const { x } = getPointPosition(pt);
-    const isBottom = pt <= 12;
-    const z = isBottom ? hl + fw * 0.5 : -(hl + fw * 0.5);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 64; canvas.height = 32;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#c0a060';
-    ctx.font = 'bold 22px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(pt), 32, 16);
-
-    const tex = new THREE.CanvasTexture(canvas);
-    const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true });
-    const sprite = new THREE.Sprite(spriteMat);
-    sprite.position.set(x, BOARD.frameH + 0.5, z);
-    sprite.scale.set(1.2, 0.6, 1);
-    boardGroup.add(sprite);
-  }
-}
-createPointLabels();
 
 // ─── Initial Render ──────────────────────────────────────────────────────────
 
